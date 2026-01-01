@@ -1,11 +1,31 @@
-id,value,processed
-1,alpha,y
-2,beta,
-3,gamma,p
-4,delta,y
-5,epsilon,p
-6,zeta,
-7,eta,y
-8,theta,p
-9,iota,
-10,kappa,y
+transaction_id,account_id,amount,currency,transaction_type,processed,timestamp,status,description
+1,1001,250.00,USD,deposit,y,2025-12-01T08:12:34,completed,Salary deposit
+2,1002,120.50,USD,withdrawal,,2025-12-01T09:01:12,pending,ATM withdrawal
+3,1003,5000.00,USD,transfer,p,2025-12-01T09:45:00,completed,Transfer to savings
+4,1004,75.20,USD,withdrawal,y,2025-12-01T10:15:10,completed,Card purchase
+5,1005,1020.00,USD,deposit,,2025-12-01T11:02:05,completed,Customer refund
+6,1006,15.00,USD,withdrawal,p,2025-12-01T11:30:12,failed,Fee
+7,1007,340.75,USD,transfer,y,2025-12-01T12:05:22,completed,Transfer to checking
+8,1008,60.00,USD,withdrawal,,2025-12-01T12:45:00,pending,POS purchase
+9,1009,999.99,USD,deposit,p,2025-12-01T13:10:50,completed,Investment payout
+10,1010,45.00,USD,withdrawal,y,2025-12-01T13:55:10,completed,Coffee shop
+11,1001,220.00,USD,deposit,y,2025-12-02T08:10:00,completed,Salary deposit
+12,1002,200.00,USD,transfer,,2025-12-02T08:45:00,pending,Transfer to external
+13,1003,30.00,USD,withdrawal,p,2025-12-02T09:15:00,failed,ATM error
+14,1004,400.00,USD,deposit,y,2025-12-02T09:50:00,completed,Bonus
+15,1005,12.34,USD,withdrawal,,2025-12-02T10:30:00,pending,Small purchase
+16,1006,1500.00,USD,deposit,p,2025-12-02T11:00:00,completed,Wire incoming
+17,1007,60.00,USD,withdrawal,y,2025-12-02T11:32:00,completed,Groceries
+18,1008,75.00,USD,transfer,,2025-12-02T12:10:00,pending,Transfer internal
+19,1009,500.00,USD,deposit,p,2025-12-02T12:45:00,completed,Sale proceeds
+20,1010,25.00,USD,withdrawal,y,2025-12-02T13:20:00,completed,Lunch
+21,1011,800.00,USD,deposit,y,2025-12-03T08:10:00,completed,Salary
+22,1012,100.00,USD,withdrawal,,2025-12-03T09:00:00,pending,Online purchase
+23,1013,60.00,USD,transfer,p,2025-12-03T09:30:00,completed,Transfer to friend
+24,1014,5.00,USD,withdrawal,y,2025-12-03T10:00:00,completed,Service fee
+25,1015,1234.56,USD,deposit,,2025-12-03T10:45:00,completed,Invoice payment
+26,1016,250.00,USD,withdrawal,p,2025-12-03T11:20:00,failed,Insufficient funds
+27,1017,360.00,USD,transfer,y,2025-12-03T11:55:00,completed,Savings top-up
+28,1018,47.50,USD,withdrawal,,2025-12-03T12:30:00,pending,POS
+29,1019,9999.99,USD,deposit,p,2025-12-03T13:05:00,completed,Large transfer
+30,1020,18.75,USD,withdrawal,y,2025-12-03T13:40:00,completed,Snacks
