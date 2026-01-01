@@ -1,6 +1,6 @@
 # streamlit_filemetry
 
-![Streamlit Filemetry](images/Streamlit_filemetry.png)
+![Streamlit Filemetry](./images/Streamlit_filemetry.png)
 
 Streamlit Filemetry — demo app for file processing and simple analytics using PySpark. It can be used as a starter template for file processing analytics in ETL systems.
 
