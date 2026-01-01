@@ -1,63 +1,52 @@
+import os
+import time
+import re
+import sqlite3
+import pandas as pd
 import streamlit as st
+
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import when, col, lit
-import pandas as pd
-import os
-import sqlite3
 
 
+# =============================
+# Spark helpers (internal only)
+# =============================
+@st.cache_resource
 def create_spark():
-    return SparkSession.builder.master("local[*]").appName("StreamlitFilemetry").getOrCreate()
-
-
-def load_data(uploaded_file):
-    if uploaded_file is not None:
-        return pd.read_csv(uploaded_file)
-    sample_path = os.path.join(os.path.dirname(__file__), "sample_data", "sample.csv")
-    return pd.read_csv(sample_path)
-
-
-def spark_process(spark, pdf):
-    sdf = spark.createDataFrame(pdf)
-    sdf = sdf.withColumn(
-        "processed_flag", when(col("processed") == "y", lit("processed")).otherwise(lit("unprocessed"))
+    return (
+        SparkSession.builder
+        .master("local[*]")
+        .appName("Filemetry")
+        .getOrCreate()
     )
-    counts = sdf.groupBy("processed_flag").count().toPandas()
+
+
+def prepare_spark_view(df: pd.DataFrame):
+    spark = create_spark()
+
+    sdf = spark.createDataFrame(df)
+    if "processed" in sdf.columns:
+        sdf = sdf.withColumn(
+            "processed_flag",
+            when(col("processed") == "y", lit("processed"))
+            .otherwise(lit("unprocessed"))
+        )
+
     sdf.createOrReplaceTempView("records")
-    return sdf, counts
+    return spark
 
 
-def run_template_queries(spark):
-    # Template SQL queries against the Spark temp view `records`
-    q1 = "SELECT processed, COUNT(*) as cnt FROM records GROUP BY processed"
-    q2 = "SELECT * FROM records WHERE processed IS NULL OR processed != 'y' LIMIT 20"
-    r1 = spark.sql(q1).toPandas()
-    r2 = spark.sql(q2).toPandas()
-    return {"processed_counts": r1, "unprocessed_sample": r2}
-
-
-# Backend helpers
-def init_sqlite_db(db_path, df, table_name="records"):
-    conn = sqlite3.connect(db_path)
-    try:
-        df.to_sql(table_name, conn, if_exists="replace", index=False)
-    finally:
-        conn.close()
-
-
+# =============================
+# DB helpers
+# =============================
 def execute_sqlite_query(db_path, query):
-    conn = sqlite3.connect(db_path)
-    try:
+    with sqlite3.connect(db_path) as conn:
         return pd.read_sql_query(query, conn)
-    finally:
-        conn.close()
 
 
 def execute_sqlalchemy_query(conn_str, query):
-    try:
-        import sqlalchemy
-    except Exception as e:
-        raise RuntimeError("SQLAlchemy is required for this backend (install 'sqlalchemy' and DB driver).") from e
+    import sqlalchemy
     engine = sqlalchemy.create_engine(conn_str)
     try:
         return pd.read_sql_query(query, engine)
@@ -65,183 +54,304 @@ def execute_sqlalchemy_query(conn_str, query):
         engine.dispose()
 
 
-def execute_postgres_query(conn_str, query):
-    return execute_sqlalchemy_query(conn_str, query)
+# =============================
+# Utilities
+# =============================
+def load_data(uploaded_file):
+    if uploaded_file is not None:
+        return pd.read_csv(uploaded_file)
+
+    sample_path = os.path.join(
+        os.path.dirname(__file__), "sample_data", "sample.csv"
+    )
+    return pd.read_csv(sample_path)
 
 
-def execute_oracle_query(conn_str, query):
-    return execute_sqlalchemy_query(conn_str, query)
+def apply_date_filter(query, column, date_from, date_to):
+    def _fmt(d):
+        try:
+            return d.isoformat()
+        except Exception:
+            return str(d)
+
+    conditions = []
+
+    # If both dates are provided and equal, use equality on the DATE cast
+    if date_from and date_to and date_from == date_to:
+        ds = _fmt(date_from)
+        conditions.append(f"CAST({column} AS DATE) = DATE('{ds}')")
+    else:
+        if date_from:
+            conditions.append(f"CAST({column} AS DATE) >= DATE('{_fmt(date_from)}')")
+        if date_to:
+            conditions.append(f"CAST({column} AS DATE) <= DATE('{_fmt(date_to)}')")
+
+    if not conditions:
+        return query
+
+    clause = " AND ".join(conditions)
+
+    # Remove trailing semicolon for manipulation, we'll re-add it later
+    trailing_semicolon = query.rstrip().endswith(";")
+    q_work = query.rstrip().rstrip(";")
+
+    # Find clause keywords using regex word boundaries
+    pattern = re.compile(r"\b(order by|group by|having|limit|offset)\b", flags=re.IGNORECASE)
+    matches = list(pattern.finditer(q_work))
+
+    # If query already has a WHERE, insert the new conditions into that WHERE
+    where_match = re.search(r"\bwhere\b", q_work, flags=re.IGNORECASE)
+    if where_match:
+        where_start = where_match.start()
+        # find next clause appearing after WHERE
+        next_after_where = [m for m in matches if m.start() > where_start]
+        if next_after_where:
+            first_next = min(next_after_where, key=lambda m: m.start())
+            pos = first_next.start()
+            before = q_work[:pos]
+            after = q_work[pos:]
+            # Insert AND {clause} before the next clause
+            new_q = f"{before} AND {clause} {after}"
+        else:
+            # No following clause, append at end
+            new_q = f"{q_work} AND {clause}"
+
+        if trailing_semicolon:
+            new_q = new_q.rstrip() + ";"
+        return new_q
+
+    # No existing WHERE: insert WHERE before the earliest clause or append
+    if matches:
+        first = min(matches, key=lambda m: m.start())
+        pos = first.start()
+        before = q_work[:pos]
+        after = q_work[pos:]
+        new_q = f"{before} WHERE {clause} {after}"
+    else:
+        new_q = f"{q_work} WHERE {clause}"
+
+    if trailing_semicolon:
+        new_q = new_q.rstrip() + ";"
+
+    return new_q
 
 
+def detect_date_column(columns):
+    for c in ["createdat", "created_at", "timestamp"]:
+        if c in columns:
+            return c
+    return None
+
+
+def strip_limit_offset(query: str) -> str:
+    """Return query without LIMIT/OFFSET clauses and trailing semicolon."""
+    q = query.rstrip().rstrip(";")
+    # remove limit ... offset ... (case-insensitive)
+    q = re.sub(r"(?i)\s+limit\s+\d+(\s+offset\s+\d+)?", "", q)
+    q = re.sub(r"(?i)\s+offset\s+\d+", "", q)
+    return q
+
+
+def get_total_count_for_query(query: str, data_source, spark, pg_conn, custom_conn):
+    q_no_limit = strip_limit_offset(query)
+    count_q = f"SELECT COUNT(*) AS __total_count__ FROM ({q_no_limit}) AS _q"
+    try:
+        if data_source in ["File (CSV)", "SQLite (local)"]:
+            # Spark path
+            df_count = spark.sql(count_q).toPandas()
+            return int(df_count['__total_count__'].iloc[0])
+        else:
+            # SQLAlchemy path (Postgres / custom)
+            if data_source == "Postgres":
+                df_count = execute_sqlalchemy_query(pg_conn, count_q)
+            else:
+                df_count = execute_sqlalchemy_query(custom_conn, count_q)
+            return int(df_count['__total_count__'].iloc[0])
+    except Exception:
+        return None
+
+
+# =============================
+# Main App
+# =============================
 def main():
-    st.title("Streamlit Filemetry")
-    st.markdown("Demo processing of records where `processed` is 'y', null, or other values (e.g. 'p').")
+    st.set_page_config(page_title="Streamlit Filemetry", layout="wide")
 
-    # Sidebar: backend selection / config and template-query editor
-        st.set_page_config(page_title="Streamlit Filemetry", layout="wide")
+    # ---------- Theme ----------
+    st.markdown(
+        """
+        <style>
+        .app-header {
+            background-color:#0b6b3a;
+            padding:12px;
+            border-radius:6px;
+        }
+        .app-header h1 {
+            color:white;
+            margin:0;
+        }
+        .stButton>button {
+            background-color:#0b6b3a;
+            color:white;
+            border-radius:6px;
+        }
+        /* Green loader */
+        .green-loader { display:inline-block; width:20px; height:20px; border:3px solid #e6f0ea; border-top-color:#0b6b3a; border-radius:50%; animation:spin 1s linear infinite; margin-right:8px; }
+        .green-loader-text { color:#0b6b3a; display:inline-block; vertical-align:middle; font-weight:600; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
-        # Green theme header styles (inline CSS)
-        st.markdown(
-            """
-            <style>
-            .app-header {background-color:#0b6b3a;padding:10px;border-radius:6px}
-            .app-header h1{color:#fff;margin:0;padding:0}
-            .stButton>button{background-color:#0b6b3a;color:white}
-            </style>
-            """,
-            unsafe_allow_html=True,
+    st.markdown('<div class="app-header"><h1>Streamlit Filemetry</h1></div>', unsafe_allow_html=True)
+    st.caption("File processing telemetry & query observability")
+
+    # ---------- Sidebar ----------
+    st.sidebar.header("Data Source")
+
+    data_source = st.sidebar.selectbox(
+        "Source",
+        ["File (CSV)", "SQLite (local)", "Postgres", "Custom DB"]
+    )
+
+    csv_file = None
+    sqlite_path = None
+    pg_conn = None
+    custom_conn = None
+
+    if data_source == "File (CSV)":
+        csv_file = st.sidebar.file_uploader("Upload CSV", type=["csv"])
+
+    elif data_source == "SQLite (local)":
+        sqlite_path = st.sidebar.text_input(
+            "SQLite DB path",
+            value=os.path.join(os.getcwd(), "demo_records.db")
         )
 
-        st.markdown('<div class="app-header"><h1>Streamlit Filemetry</h1></div>', unsafe_allow_html=True)
-        st.markdown("Demo processing of records where `processed` is 'y', null, or other values (e.g. 'p').")
+    elif data_source == "Postgres":
+        pg_conn = st.sidebar.text_input(
+            "Postgres SQLAlchemy URL",
+            value="postgresql+psycopg2://user:pass@host:5432/db"
+        )
 
-        # Sidebar: choose data source type (file or DB)
-        st.sidebar.header("Data Source & Backend")
-        data_source = st.sidebar.selectbox("Data Source Type", ["File (CSV)", "SQLite (local)", "Postgres", "Oracle", "Spark TempView"])
+    elif data_source == "Custom DB":
+        custom_conn = st.sidebar.text_input(
+            "SQLAlchemy URL",
+            placeholder="dialect+driver://user:pass@host/db"
+        )
 
-        # File options
-        csv_option = None
-        if data_source == "File (CSV)":
-            csv_mode = st.sidebar.radio("CSV source", ["Use sample file", "Upload CSV"])
-            if csv_mode == "Use sample file":
-                csv_option = os.path.join(os.path.dirname(__file__), "sample_data", "sample.csv")
-            else:
-                uploaded_file = st.sidebar.file_uploader("Upload CSV file", type=["csv"])  
-                csv_option = uploaded_file
+    # ---------- Query Templates ----------
+    st.sidebar.header("Query")
 
-        # SQLite options
-        sqlite_path = None
-        if data_source == "SQLite (local)":
-            sqlite_path = st.sidebar.text_input("SQLite DB path", value=os.path.join(os.getcwd(), "demo_records.db"))
-            if st.sidebar.button("Initialize SQLite DB from sample CSV"):
-                try:
-                    df_init = pd.read_csv(os.path.join(os.path.dirname(__file__), "sample_data", "sample.csv"))
-                    init_sqlite_db(sqlite_path, df_init)
-                    st.sidebar.success(f"Initialized {sqlite_path}")
-                except Exception as e:
-                    st.sidebar.error(f"Failed to init SQLite DB: {e}")
+    TEMPLATES = {
+        "Processed summary":
+            "SELECT processed_flag, COUNT(*) AS cnt FROM records GROUP BY processed_flag",
+        "Unprocessed sample":
+            "SELECT * FROM records WHERE processed_flag = 'unprocessed' LIMIT 20",
+        "Raw preview":
+            "SELECT * FROM records LIMIT 50",
+    }
 
-        # Postgres / Oracle options
-        pg_conn = None
-        oracle_conn = None
-        if data_source == "Postgres":
-            pg_conn = st.sidebar.text_input("Postgres SQLAlchemy URL", value="postgresql+psycopg2://user:pass@host:5432/dbname")
-            st.sidebar.caption("Requires SQLAlchemy + psycopg2-binary installed in the runtime")
-        if data_source == "Oracle":
-            oracle_conn = st.sidebar.text_input("Oracle SQLAlchemy URL", value="oracle+oracledb://user:pass@host:1521/?service_name=ORCLPDB1")
-            st.sidebar.caption("Requires SQLAlchemy + oracledb (or cx_Oracle) installed")
+    template = st.sidebar.selectbox("Template", list(TEMPLATES.keys()))
+    query = st.sidebar.text_area("SQL", TEMPLATES[template], height=160)
 
-        # Template query editor
-        st.sidebar.header("Template Query")
-        default_query = "SELECT processed, COUNT(*) as cnt FROM records GROUP BY processed"
-        query = st.sidebar.text_area("SQL template", value=default_query, height=160)
+    # ---------- Date Filters ----------
+    st.sidebar.header("Date Filter")
+    use_date = st.sidebar.checkbox("Apply date filter")
 
-        # Date filter (optional)
-        st.sidebar.header("Date Filter")
-        apply_date = st.sidebar.checkbox("Apply date filter on `timestamp` column", value=False)
-        date_from = None
-        date_to = None
-        if apply_date:
-            date_from = st.sidebar.date_input("From", value=None)
-            date_to = st.sidebar.date_input("To", value=None)
+    date_from = st.sidebar.date_input("From") if use_date else None
+    date_to = st.sidebar.date_input("To") if use_date else None
 
-        # Load dataframe based on data source
-        if data_source == "File (CSV)":
-            df = load_data(csv_option if not hasattr(csv_option, 'read') else csv_option)
-        elif data_source == "SQLite (local)":
-            # try to read table `records` if exists
-            try:
-                if os.path.exists(sqlite_path):
-                    df = execute_sqlite_query(sqlite_path, "SELECT * FROM records LIMIT 100000")
-                else:
-                    st.warning("SQLite DB not found; falling back to sample CSV")
-                    df = load_data(None)
-            except Exception as e:
-                st.error(f"SQLite read failed: {e}")
-                df = load_data(None)
-        elif data_source == "Postgres":
-            df = pd.DataFrame()
-            st.info("Postgres selected — run template queries via the editor once connected.")
-        elif data_source == "Oracle":
-            df = pd.DataFrame()
-            st.info("Oracle selected — run template queries via the editor once connected.")
+    run_query = st.sidebar.button("Run query")
+
+    # ---------- Load Data ----------
+    df = pd.DataFrame()
+    spark = None
+    date_column = None
+
+    if data_source == "File (CSV)":
+        df = load_data(csv_file)
+        spark = prepare_spark_view(df)
+        date_column = detect_date_column(df.columns)
+
+    elif data_source == "SQLite (local)":
+        if sqlite_path and os.path.exists(sqlite_path):
+            df = execute_sqlite_query(sqlite_path, "SELECT * FROM records")
         else:
-            # Spark TempView or fallback
             df = load_data(None)
+        spark = prepare_spark_view(df)
+        date_column = detect_date_column(df.columns)
 
-        # Apply date filter if requested
-        if not df.empty and apply_date and "timestamp" in df.columns:
+    # ---------- Layout ----------
+    left, right = st.columns([2, 1])
+
+    with left:
+        st.subheader("Input sample")
+        st.dataframe(df.head(10))
+
+    with right:
+        st.subheader("Query result")
+
+        if run_query:
+            start = time.perf_counter()
+            final_query = query
+            if use_date and date_column:
+                final_query = apply_date_filter(
+                    query, date_column, date_from, date_to
+                )
+
             try:
-                df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-                if date_from:
-                    df = df[df["timestamp"].dt.date >= date_from]
-                if date_to:
-                    df = df[df["timestamp"].dt.date <= date_to]
-            except Exception:
-                st.warning("Could not parse `timestamp` column for date filtering.")
+                # Show custom green loader while executing query and counting
+                spinner_ph = st.empty()
+                spinner_ph.markdown(
+                    "<div><span class=\"green-loader\"></span><span class=\"green-loader-text\">Running query...</span></div>",
+                    unsafe_allow_html=True,
+                )
 
-        # Main layout: metrics and charts
-        left, right = st.columns([2, 1])
+                if data_source in ["File (CSV)", "SQLite (local)"]:
+                    result = spark.sql(final_query).toPandas()
+                elif data_source == "Postgres":
+                    result = execute_sqlalchemy_query(pg_conn, final_query)
+                else:
+                    result = execute_sqlalchemy_query(custom_conn, final_query)
 
-        with left:
-            st.subheader("Input sample")
-            st.dataframe(df.head(10))
+                # Try to compute total matching rows (strip LIMIT/OFFSET)
+                total_count = get_total_count_for_query(final_query, data_source, spark, pg_conn, custom_conn)
 
-            # Spark processing always available for analytics and temp view
-            spark = create_spark()
-            sdf, counts = spark_process(spark, df)
+                # Compute elapsed time
+                elapsed = (time.perf_counter() - start) * 1000
 
-            st.subheader("Processed / Unprocessed counts (Spark)")
-            st.table(counts)
-
-            # Additional analytics: amounts distribution and transaction_type counts
-            if "amount" in df.columns:
-                st.subheader("Amount distribution")
+            except Exception as e:
+                # ensure spinner is removed on error
                 try:
-                    amt_series = pd.to_numeric(df["amount"], errors="coerce").dropna()
-                    st.bar_chart(amt_series.value_counts(bins=20).sort_index())
+                    spinner_ph.empty()
                 except Exception:
-                    st.write("Unable to render amount distribution")
-
-            if "transaction_type" in df.columns:
-                st.subheader("Transaction Type Counts")
-                tt = df["transaction_type"].fillna("(null)").value_counts()
-                st.bar_chart(tt)
-
-        with right:
-            st.subheader("Template Query Runner")
-            st.write("Selected backend: ", data_source)
-
-            if st.button("Run template query on selected backend"):
+                    pass
+                st.error(f"Query failed: {e}")
+            else:
                 try:
-                    if data_source == "Spark TempView":
-                        res = spark.sql(query).toPandas()
-                    elif data_source == "File (CSV)":
-                        # run query on Spark temp view
-                        res = spark.sql(query).toPandas()
-                    elif data_source == "SQLite (local)":
-                        res = execute_sqlite_query(sqlite_path, query)
-                    elif data_source == "Postgres":
-                        res = execute_postgres_query(pg_conn, query)
-                    elif data_source == "Oracle":
-                        res = execute_oracle_query(oracle_conn, query)
-                    else:
-                        res = pd.DataFrame()
-                    st.write(res)
-                except Exception as e:
-                    st.error(f"Query failed: {e}")
+                    spinner_ph.empty()
+                except Exception:
+                    pass
 
-            st.markdown("---")
-            st.subheader("Quick actions")
-            if st.button("Download sample CSV"):
-                st.download_button("Download", data=open(os.path.join(os.path.dirname(__file__), "sample_data", "sample.csv"), "rb"), file_name="sample.csv")
+                st.success(f"Query executed in {elapsed:.2f} ms")
+                if total_count is not None:
+                    st.caption(f"Total matching rows: {total_count}")
 
-        # Keep Spark template outputs for convenience
-        queries = run_template_queries(spark)
-        st.subheader("Template query: processed counts (Spark)")
-        st.table(queries["processed_counts"])
+                # Show a preview (max 100 rows) for performance in the frontend
+                try:
+                    st.dataframe(result.head(100))
+                except Exception:
+                    st.dataframe(result)
+        else:
+            st.info("Click **Run query** to execute")
 
-        st.subheader("Template query: unprocessed sample (Spark)")
-        st.table(queries["unprocessed_sample"])
+    st.info(
+        "Date filters are applied automatically if a supported timestamp column exists "
+        "(createdat, created_at, timestamp). Spark is internal only."
+    )
 
-        st.info("In this demo, records with `processed=='y'` are considered processed; all others are unprocessed.")
+
+if __name__ == "__main__":
+    main()
