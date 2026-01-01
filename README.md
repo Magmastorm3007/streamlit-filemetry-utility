@@ -1,5 +1,7 @@
 # streamlit_filemetry
 
+![Streamlit Filemetry](./images/Streamlit_filemetry.png)
+
 Streamlit Filemetry — demo app for file processing and simple analytics using PySpark. It can be used as a starter template for file processing analytics in ETL systems.
 
 Project path (example): `~/Projects/Python/streamlit_filemetry`
@@ -165,4 +167,52 @@ If you'd like, I can also:
 - Add a `.env.example` and a small script to initialize the SQLite DB from `sample_data/sample.csv`.
 
 Enjoy — let me know if you want the Compose file extended with a demo Postgres or Oracle setup.
+
+Linux distro notes
+
+The commands above assume a Debian/Ubuntu-like system. Docker and Java installation steps vary across Linux distributions — below are quick notes for other common distros.
+
+- Fedora / RHEL (dnf):
+```bash
+# Fedora / RHEL
+sudo dnf install -y dnf-plugins-core
+sudo dnf config-manager --add-repo https://download.docker.com/linux/fedora/docker-ce.repo
+sudo dnf install -y docker-ce docker-ce-cli containerd.io
+sudo systemctl enable --now docker
+# Compose plugin availability varies by distro
+sudo dnf install -y docker-compose-plugin || true
+```
+
+- CentOS / Alma / Rocky (yum/dnf):
+```bash
+sudo dnf install -y yum-utils
+sudo yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+sudo dnf install -y docker-ce docker-ce-cli containerd.io
+sudo systemctl enable --now docker
+```
+
+- openSUSE (zypper):
+```bash
+sudo zypper install -y docker
+sudo systemctl enable --now docker
+```
+
+- Arch Linux (pacman):
+```bash
+sudo pacman -Syu docker
+sudo systemctl enable --now docker
+```
+
+Notes and caveats
+
+- Java package names differ: `openjdk-11-jre-headless`, `openjdk-17-jre`, or `openjdk-21-jre` depending on distro and release. If `apt`/`dnf` can’t find a specific package, check your distro’s package list or install a JDK via SDKMAN, AdoptOpenJDK, or OpenJDK binaries.
+- Docker Compose packaging differs: prefer the `docker compose` (v2) plugin if available; otherwise install the legacy `docker-compose` binary.
+- If Docker requires `sudo`, either run with `sudo` or add your user to the `docker` group and re-login:
+```bash
+sudo usermod -aG docker $USER
+newgrp docker
+```
+- For DB clients (Postgres, Oracle) you may need distro-specific dev packages (e.g., `libpq-dev`, `oracle-instantclient-basic`); update the `Dockerfile` and rebuild when adding those.
+
+If you want, I can patch the `Dockerfile` to include commented examples for installing Postgres client headers, Oracle Instant Client, and multiple OpenJDK options — shall I proceed with those Dockerfile comments and optional installs?*** End Patch
 
